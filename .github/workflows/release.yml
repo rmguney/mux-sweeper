@@ -1,0 +1,106 @@
+name: Build and Release (muxsw MVP)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate Version
+        id: version
+        shell: pwsh
+        run: |
+          $commitCount = git rev-list --count HEAD
+          $version = "v.0.$commitCount"
+          echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+          echo "Generated version: $version"
+
+      - name: Setup MSVC
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Configure (CMake Release, audio off)
+        shell: pwsh
+        run: |
+          cmake -S . -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DMUXSW_ENABLE_AUDIO=OFF `
+            -DCMAKE_C_FLAGS_RELEASE="/O1 /DNDEBUG /GL /Gy /GS- /Gm- /fp:fast" `
+            -DCMAKE_EXE_LINKER_FLAGS_RELEASE="/LTCG /OPT:REF /OPT:ICF /MERGE:.rdata=.text /MERGE:.pdata=.text"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release
+
+      - name: Package Binaries
+        shell: pwsh
+        run: |
+          mkdir package
+          copy release\muxsw.exe package\
+          copy release\muxsw-gui.exe package\
+          copy LICENSE package\
+          copy README.md package\
+
+      - name: Get Binary Sizes
+        id: sizes
+        shell: pwsh
+        run: |
+          $cli = (Get-Item "release\muxsw.exe").Length
+          $gui = (Get-Item "release\muxsw-gui.exe").Length
+          echo "CLI_SIZE=$([math]::Round($cli/1KB, 1))KB" >> $env:GITHUB_OUTPUT
+          echo "GUI_SIZE=$([math]::Round($gui/1KB, 1))KB" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: muxsw-windows-x64
+          path: package/
+
+      - name: Create Release Zip
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        shell: pwsh
+        run: Compress-Archive -Path package\* -DestinationPath muxsw-windows-x64.zip
+
+      - name: Create or Update Release
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: "Mux Sweeper ${{ steps.version.outputs.VERSION }}"
+          files: muxsw-win-x64.zip
+          body: |
+            # Mux Sweeper (muxsw) ${{ steps.version.outputs.VERSION }}
+
+            **Ultra-lightweight, zero-dependency screen capture for Windows. Built in pure C99.**
+            ```powershell
+            # GUI
+            .\release\muxsw-gui.exe
+
+            # CLI - 10 second recording
+            .\release\muxsw.exe --time 10 --out capture.mp4
+
+            # Advanced - Monitor 2, region capture, 60fps
+            .\release\muxsw.exe --monitor 2 --region 100 100 1920 1080 --fps 60 --out demo.mp4
+            ```
+
+            ### Binary Sizes
+            - CLI: ${{ steps.sizes.outputs.CLI_SIZE }}
+            - GUI: ${{ steps.sizes.outputs.GUI_SIZE }}
+
+            **Commit**: ${{ github.sha }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          
